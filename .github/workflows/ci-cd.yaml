@@ -88,36 +88,42 @@ jobs:
     - name: Set up kubectl
       uses: azure/setup-kubectl@v3
 
-    - name: Create kubeconfig with base64 CA
+    - name: Create kubeconfig
       env:
         K8S_CA_CERT: ${{ secrets.K8S_CA_CERT }}
         K8S_ENDPOINT: ${{ secrets.K8S_ENDPOINT }}
         K8S_TOKEN: ${{ secrets.K8S_TOKEN }}
       run: |
-        # Конвертируем CA cert в base64
-        CA_CERT_BASE64=$(echo -n "$K8S_CA_CERT" | base64 -w 0)
+        # Убедимся, что CA cert правильно закодирован
+        CA_CERT_BASE64=$(echo "$K8S_CA_CERT" | base64 -w 0)
         
-        echo "apiVersion: v1" > kubeconfig.yaml
-        echo "clusters:" >> kubeconfig.yaml
-        echo "- cluster:" >> kubeconfig.yaml
-        echo "    certificate-authority-data: $CA_CERT_BASE64" >> kubeconfig.yaml
-        echo "    server: $K8S_ENDPOINT" >> kubeconfig.yaml
-        echo "  name: cluster" >> kubeconfig.yaml
-        echo "contexts:" >> kubeconfig.yaml
-        echo "- context:" >> kubeconfig.yaml
-        echo "    cluster: cluster" >> kubeconfig.yaml
-        echo "    user: user" >> kubeconfig.yaml
-        echo "  name: context" >> kubeconfig.yaml
-        echo "current-context: context" >> kubeconfig.yaml
-        echo "kind: Config" >> kubeconfig.yaml
-        echo "users:" >> kubeconfig.yaml
-        echo "- name: user" >> kubeconfig.yaml
-        echo "  user:" >> kubeconfig.yaml
-        echo "    token: $K8S_TOKEN" >> kubeconfig.yaml
+        cat > kubeconfig.yaml << EOF
+        apiVersion: v1
+        kind: Config
+        clusters:
+        - name: cluster
+          cluster:
+            certificate-authority-data: $CA_CERT_BASE64
+            server: $K8S_ENDPOINT
+        contexts:
+        - name: context
+          context:
+            cluster: cluster
+            user: user
+            namespace: $K8S_NAMESPACE
+        current-context: context
+        users:
+        - name: user
+          user:
+            token: $K8S_TOKEN
+        EOF
         
         echo "Kubeconfig created successfully"
         echo "CA cert length: ${#K8S_CA_CERT}"
         echo "Base64 CA cert length: ${#CA_CERT_BASE64}"
+        
+        # Проверим синтаксис kubeconfig
+        kubectl --kubeconfig=kubeconfig.yaml config view
 
     - name: Test cluster connection
       run: |

@@ -88,16 +88,19 @@ jobs:
     - name: Set up kubectl
       uses: azure/setup-kubectl@v3
 
-    - name: Create kubeconfig
+    - name: Create kubeconfig with base64 CA
       env:
         K8S_CA_CERT: ${{ secrets.K8S_CA_CERT }}
         K8S_ENDPOINT: ${{ secrets.K8S_ENDPOINT }}
         K8S_TOKEN: ${{ secrets.K8S_TOKEN }}
       run: |
+        # Конвертируем CA cert в base64
+        CA_CERT_BASE64=$(echo -n "$K8S_CA_CERT" | base64 -w 0)
+        
         echo "apiVersion: v1" > kubeconfig.yaml
         echo "clusters:" >> kubeconfig.yaml
         echo "- cluster:" >> kubeconfig.yaml
-        echo "    certificate-authority-data: $K8S_CA_CERT" >> kubeconfig.yaml
+        echo "    certificate-authority-data: $CA_CERT_BASE64" >> kubeconfig.yaml
         echo "    server: $K8S_ENDPOINT" >> kubeconfig.yaml
         echo "  name: cluster" >> kubeconfig.yaml
         echo "contexts:" >> kubeconfig.yaml
@@ -113,13 +116,14 @@ jobs:
         echo "    token: $K8S_TOKEN" >> kubeconfig.yaml
         
         echo "Kubeconfig created successfully"
-        echo "First 5 lines of kubeconfig:"
-        head -5 kubeconfig.yaml
+        echo "CA cert length: ${#K8S_CA_CERT}"
+        echo "Base64 CA cert length: ${#CA_CERT_BASE64}"
 
-    - name: Test kubeconfig
+    - name: Test cluster connection
       run: |
         export KUBECONFIG=kubeconfig.yaml
         echo "Testing cluster connection..."
+        kubectl cluster-info
         kubectl get nodes
 
     - name: Deploy to Kubernetes
@@ -141,13 +145,16 @@ jobs:
         kubectl rollout status deployment/$DEPLOYMENT_NAME -n $K8S_NAMESPACE --timeout=300s
         
         echo "Deployment status:"
-        kubectl get deployment/$DEPLOYMENT_NAME -n $K8S_NAMESPACE
+        kubectl get deployment/$DEPLOYMENT_NAME -n $K8S_NAMESPACE -o wide
 
     - name: Verify application
       run: |
         export KUBECONFIG=kubeconfig.yaml
         echo "Verifying deployment..."
+        echo "Pods status:"
         kubectl get pods -n $K8S_NAMESPACE -l app=$DEPLOYMENT_NAME
+        echo "Services status:"
+        kubectl get svc -n $K8S_NAMESPACE
 
   notify:
     needs: [build-and-test, push-to-registry, deploy-to-k8s]

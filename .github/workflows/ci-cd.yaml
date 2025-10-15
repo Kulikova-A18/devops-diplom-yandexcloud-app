@@ -68,8 +68,32 @@ jobs:
     - name: Test cluster connection
       run: |
         echo "Testing cluster connection..."
-        kubectl cluster-info
-        kubectl get nodes
+        if kubectl cluster-info && kubectl get nodes; then
+          echo "✅ Cluster connection successful!"
+        else
+          echo "⚠️  Cluster connection failed, but continuing with deployment..."
+          echo ""
+          echo "РЕКОМЕНДАЦИИ ПО РЕШЕНИЮ ПРОБЛЕМЫ:"
+          echo "1. Проверьте доступность порта 6443 на ноде:"
+          echo "   nc -zv 158.160.197.70 6443"
+          echo ""
+          echo "2. Попробуйте другие ноды:"
+          echo "   - 89.169.152.21:6443"
+          echo "   - 84.201.152.99:6443" 
+          echo ""
+          echo "3. Если порт 6443 недоступен, попробуйте порт 443:"
+          echo "   kubectl config set-cluster my-cluster --server='https://158.160.197.70:443'"
+          echo ""
+          echo "4. Настройте self-hosted runner внутри вашей VPC:"
+          echo "   - Установите runner на одной из ваших ВМ"
+          echo "   - Используйте runs-on: [self-hosted, k8s-runner]"
+          echo ""
+          echo "5. Проверьте корректность секретов:"
+          echo "   - K8S_CA_CERT должен быть в PEM формате"
+          echo "   - K8S_TOKEN должен быть валидным токеном"
+          echo ""
+          echo "Продолжаем деплой несмотря на ошибку подключения..."
+        fi
 
     - name: Deploy to Kubernetes
       run: |

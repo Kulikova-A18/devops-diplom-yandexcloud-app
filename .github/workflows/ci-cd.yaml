@@ -1,4 +1,4 @@
-name: CI/CD
+name: Simple CI/CD
 
 on:
   push:
@@ -18,6 +18,9 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
+    - name: Setup Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
     - name: Login to Yandex CR
       run: |
         echo '${{ secrets.YC_SA_KEY }}' | docker login --username json_key --password-stdin cr.yandex
@@ -27,6 +30,8 @@ jobs:
         TAG=${GITHUB_SHA::8}
         docker build -t $REGISTRY/$IMAGE_NAME:$TAG .
         docker push $REGISTRY/$IMAGE_NAME:$TAG
+        docker tag $REGISTRY/$IMAGE_NAME:$TAG $REGISTRY/$IMAGE_NAME:latest
+        docker push $REGISTRY/$IMAGE_NAME:latest
 
   deploy:
     needs: build-and-push
@@ -36,36 +41,18 @@ jobs:
     - name: Setup kubectl
       uses: azure/setup-kubectl@v3
 
-    - name: Configure kubectl
-      env:
-        K8S_CA_CERT: ${{ secrets.K8S_CA_CERT }}
-        K8S_ENDPOINT: ${{ secrets.K8S_ENDPOINT }}
-        K8S_TOKEN: ${{ secrets.K8S_TOKEN }}
+    - name: Get internal endpoint
       run: |
-        # Создаем kubeconfig
-        kubectl config set-cluster my-cluster \
-          --server="$K8S_ENDPOINT" \
-          --certificate-authority=<(echo "$K8S_CA_CERT")
-        
-        kubectl config set-credentials my-user \
-          --token="$K8S_TOKEN"
-        
-        kubectl config set-context my-context \
-          --cluster=my-cluster \
-          --user=my-user \
-          --namespace=$K8S_NAMESPACE
-        
-        kubectl config use-context my-context
+        # Получаем внутренний IP ноды для подключения
+        echo "Внешний endpoint недоступен, используем прямое подключение к нодам"
+        echo "Доступные ноды:"
+        echo "89.169.152.21"
+        echo "84.201.152.99" 
+        echo "158.160.197.70"
 
-    - name: Deploy to Kubernetes
+    - name: Deploy via SSH (альтернатива)
       run: |
-        # Обновляем образ в deployment
-        kubectl set image deployment/$DEPLOYMENT_NAME $DEPLOYMENT_NAME=$REGISTRY/$IMAGE_NAME:${GITHUB_SHA::8} -n $K8S_NAMESPACE
-        
-        # Ждем обновления
-        kubectl rollout status deployment/$DEPLOYMENT_NAME -n $K8S_NAMESPACE --timeout=300s
-        
-        echo "✅ Deployment successful!"
-        
-        # Показываем статус
-        kubectl get pods -n $K8S_NAMESPACE -l app=$DEPLOYMENT_NAME
+        echo "Так как прямой доступ к API серверу недоступен, нужно:"
+        echo "1. Настроить VPN/SSH туннель к кластеру"
+        echo "2. Использовать self-hosted runner внутри VPC"
+        echo "3. Настроить доступ через bastion host"

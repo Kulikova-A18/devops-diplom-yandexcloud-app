@@ -2,11 +2,7 @@ name: CI/CD Pipeline
 
 on:
   push:
-    branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
-  release:
-    types: [ published ]
+    branches: [main]
 
 env:
   REGISTRY: cr.yandex/crps1p5u048a00f4o97j
@@ -15,168 +11,38 @@ env:
   DEPLOYMENT_NAME: testapp
 
 jobs:
-  build-and-test:
+  build-and-push:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout code
+    - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-
-    - name: Build Docker image
+    - name: Login to Yandex CR
       run: |
-        docker build -t $REGISTRY/$IMAGE_NAME:${GITHUB_SHA::8} .
-        docker build -t $REGISTRY/$IMAGE_NAME:latest .
+        echo '${{ secrets.YC_SA_KEY }}' | docker login --username json_key --password-stdin cr.yandex
 
-    - name: Run tests
+    - name: Build and push
       run: |
-        echo "Running tests..."
-        if [ -f "index.html" ]; then
-          echo "✓ index.html found"
-        else
-          echo "✗ index.html not found"
-          exit 1
-        fi
+        TAG=${GITHUB_SHA::8}
+        docker build -t $REGISTRY/$IMAGE_NAME:$TAG .
+        docker push $REGISTRY/$IMAGE_NAME:$TAG
 
-  push-to-registry:
-    needs: build-and-test
+  deploy:
+    needs: build-and-push
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' || github.event_name == 'release'
     
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-
-    - name: Log in to Yandex Container Registry
-      run: |
-        echo '${{ secrets.YC_SA_KEY }}' > /tmp/key.json
-        cat /tmp/key.json | docker login --username json_key --password-stdin cr.yandex
-
-    - name: Build and push Docker image
-      run: |
-        if [ "${{ github.event_name }}" == "release" ]; then
-          IMAGE_TAG="${{ github.event.release.tag_name }}"
-        else
-          IMAGE_TAG="${GITHUB_SHA::8}"
-        fi
-        
-        echo "Building image: $REGISTRY/$IMAGE_NAME:$IMAGE_TAG"
-        
-        docker build -t $REGISTRY/$IMAGE_NAME:$IMAGE_TAG .
-        docker push $REGISTRY/$IMAGE_NAME:$IMAGE_TAG
-        
-        if [ "${{ github.event_name }}" == "push" ]; then
-          docker tag $REGISTRY/$IMAGE_NAME:$IMAGE_TAG $REGISTRY/$IMAGE_NAME:latest
-          docker push $REGISTRY/$IMAGE_NAME:latest
-          echo "Pushed latest tag"
-        fi
-
-  deploy-to-k8s:
-    needs: push-to-registry
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' || github.event_name == 'release'
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Set up kubectl
+    - name: Setup kubectl
       uses: azure/setup-kubectl@v3
 
-    - name: Create kubeconfig
+    - name: Deploy to cluster
       env:
-        K8S_CA_CERT: ${{ secrets.K8S_CA_CERT }}
-        K8S_ENDPOINT: ${{ secrets.K8S_ENDPOINT }}
-        K8S_TOKEN: ${{ secrets.K8S_TOKEN }}
+        K8S_CONFIG: ${{ secrets.K8S_CONFIG }}
       run: |
-        # Альтернативный подход - создаем файл по частям
-        echo "apiVersion: v1" > kubeconfig.yaml
-        echo "kind: Config" >> kubeconfig.yaml
-        echo "clusters:" >> kubeconfig.yaml
-        echo "- name: cluster" >> kubeconfig.yaml
-        echo "  cluster:" >> kubeconfig.yaml
-        echo "    certificate-authority-data: $K8S_CA_CERT" >> kubeconfig.yaml
-        echo "    server: $K8S_ENDPOINT" >> kubeconfig.yaml
-        echo "contexts:" >> kubeconfig.yaml
-        echo "- name: context" >> kubeconfig.yaml
-        echo "  context:" >> kubeconfig.yaml
-        echo "    cluster: cluster" >> kubeconfig.yaml
-        echo "    user: user" >> kubeconfig.yaml
-        echo "    namespace: $K8S_NAMESPACE" >> kubeconfig.yaml
-        echo "current-context: context" >> kubeconfig.yaml
-        echo "users:" >> kubeconfig.yaml
-        echo "- name: user" >> kubeconfig.yaml
-        echo "  user:" >> kubeconfig.yaml
-        echo "    token: $K8S_TOKEN" >> kubeconfig.yaml
+        # Создаем kubeconfig из секрета
+        echo "$K8S_CONFIG" > kubeconfig.yaml
         
-        echo "Kubeconfig created successfully"
-        echo "Kubeconfig content:"
-        cat kubeconfig.yaml
-        
-        # Проверим синтаксис kubeconfig
-        echo "Validating kubeconfig syntax..."
-        kubectl --kubeconfig=kubeconfig.yaml config view
-
-    - name: Test cluster connection
-      run: |
-        export KUBECONFIG=kubeconfig.yaml
-        echo "Testing cluster connection..."
-        kubectl cluster-info
-        kubectl get nodes
-
-    - name: Deploy to Kubernetes
-      run: |
-        export KUBECONFIG=kubeconfig.yaml
-        
-        if [ "${{ github.event_name }}" == "release" ]; then
-          TAG="${{ github.event.release.tag_name }}"
-        else
-          TAG="${GITHUB_SHA::8}"
-        fi
-        
-        IMAGE_URL="$REGISTRY/$IMAGE_NAME:$TAG"
-        echo "Deploying image: $IMAGE_URL"
-        
-        # Создаем namespace если не существует
-        kubectl create namespace $K8S_NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
-        
-        kubectl set image deployment/$DEPLOYMENT_NAME $DEPLOYMENT_NAME=$IMAGE_URL -n $K8S_NAMESPACE
-        
-        echo "Waiting for rollout..."
-        kubectl rollout status deployment/$DEPLOYMENT_NAME -n $K8S_NAMESPACE --timeout=300s
-        
-        echo "Deployment status:"
-        kubectl get deployment/$DEPLOYMENT_NAME -n $K8S_NAMESPACE -o wide
-
-    - name: Verify application
-      run: |
-        export KUBECONFIG=kubeconfig.yaml
-        echo "Verifying deployment..."
-        echo "Pods status:"
-        kubectl get pods -n $K8S_NAMESPACE -l app=$DEPLOYMENT_NAME
-        echo "Services status:"
-        kubectl get svc -n $K8S_NAMESPACE
-
-  notify:
-    needs: [build-and-test, push-to-registry, deploy-to-k8s]
-    runs-on: ubuntu-latest
-    if: always()
-    
-    steps:
-    - name: Notify success
-      if: needs.build-and-test.result == 'success' && needs.push-to-registry.result == 'success' && needs.deploy-to-k8s.result == 'success'
-      run: |
-        echo "🎉 CI/CD Pipeline completed successfully!"
-        echo "Image: $REGISTRY/$IMAGE_NAME:${GITHUB_SHA::8}"
-        echo "Deployed to namespace: $K8S_NAMESPACE"
-
-    - name: Notify failure
-      if: needs.build-and-test.result == 'failure' || needs.push-to-registry.result == 'failure' || needs.deploy-to-k8s.result == 'failure'
-      run: |
-        echo "❌ CI/CD Pipeline failed"
-        exit 1
+        # Деплоим
+        kubectl --kubeconfig=kubeconfig.yaml set image deployment/$DEPLOYMENT_NAME $DEPLOYMENT_NAME=$REGISTRY/$IMAGE_NAME:${GITHUB_SHA::8} -n $K8S_NAMESPACE
+        kubectl --kubeconfig=kubeconfig.yaml rollout status deployment/$DEPLOYMENT_NAME -n $K8S_NAMESPACE --timeout=300s

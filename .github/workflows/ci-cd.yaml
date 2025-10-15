@@ -41,18 +41,60 @@ jobs:
     - name: Setup kubectl
       uses: azure/setup-kubectl@v3
 
-    - name: Get internal endpoint
+    - name: Configure kubectl with node IP
+      env:
+        K8S_CA_CERT: ${{ secrets.K8S_CA_CERT }}
+        K8S_TOKEN: ${{ secrets.K8S_TOKEN }}
       run: |
-        # Получаем внутренний IP ноды для подключения
-        echo "Внешний endpoint недоступен, используем прямое подключение к нодам"
-        echo "Доступные ноды:"
-        echo "89.169.152.21"
-        echo "84.201.152.99" 
-        echo "158.160.197.70"
+        # Используем IP одной из нод напрямую
+        NODE_IP="158.160.197.70"  # Одна из ваших рабочих нод
+        
+        echo "Configuring kubectl to use node IP: $NODE_IP"
+        
+        kubectl config set-cluster my-cluster \
+          --server="https://$NODE_IP:6443" \
+          --certificate-authority=<(echo "$K8S_CA_CERT")
+        
+        kubectl config set-credentials my-user \
+          --token="$K8S_TOKEN"
+        
+        kubectl config set-context my-context \
+          --cluster=my-cluster \
+          --user=my-user \
+          --namespace=$K8S_NAMESPACE
+        
+        kubectl config use-context my-context
 
-    - name: Deploy via SSH (альтернатива)
+    - name: Test cluster connection
       run: |
-        echo "Так как прямой доступ к API серверу недоступен, нужно:"
-        echo "1. Настроить VPN/SSH туннель к кластеру"
-        echo "2. Использовать self-hosted runner внутри VPC"
-        echo "3. Настроить доступ через bastion host"
+        echo "Testing cluster connection..."
+        kubectl cluster-info
+        kubectl get nodes
+
+    - name: Deploy to Kubernetes
+      run: |
+        # Обновляем образ в deployment
+        IMAGE_TAG="${GITHUB_SHA::8}"
+        echo "Deploying image: $REGISTRY/$IMAGE_NAME:$IMAGE_TAG"
+        
+        kubectl set image deployment/$DEPLOYMENT_NAME $DEPLOYMENT_NAME=$REGISTRY/$IMAGE_NAME:$IMAGE_TAG -n $K8S_NAMESPACE
+        
+        # Ждем обновления
+        echo "Waiting for rollout..."
+        kubectl rollout status deployment/$DEPLOYMENT_NAME -n $K8S_NAMESPACE --timeout=300s
+        
+        echo "✅ Deployment successful!"
+        
+        # Показываем статус
+        echo "Current pods:"
+        kubectl get pods -n $K8S_NAMESPACE -l app=$DEPLOYMENT_NAME
+
+    - name: Verify application
+      run: |
+        echo "Verifying application..."
+        sleep 10
+        
+        echo "Final pod status:"
+        kubectl get pods -n $K8S_NAMESPACE -l app=$DEPLOYMENT_NAME
+        
+        echo "✅ Application deployment completed!"

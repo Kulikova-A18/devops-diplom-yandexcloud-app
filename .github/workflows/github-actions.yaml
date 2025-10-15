@@ -47,46 +47,39 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
-    - name: Create JSON key file
+    - name: Log in to Yandex Container Registry
       run: |
-        echo '${{ secrets.YC_SA_KEY }}' > key.json
-        cat key.json | jq -r '.private_key' > private_key.pem
-
-    - name: Log in to Yandex Container Registry (correct method)
-      run: |
-        cat key.json | docker login \
+        # Создаем временный файл с JSON ключом
+        cat << 'EOF' > /tmp/key.json
+        ${{ secrets.YC_SA_KEY }}
+        EOF
+        
+        # Аутентифицируемся
+        cat /tmp/key.json | docker login \
           --username json_key \
           --password-stdin \
           cr.yandex
 
-    - name: Extract metadata
-      id: meta
-      uses: docker/metadata-action@v5
-      with:
-        images: $REGISTRY/$IMAGE_NAME
-        tags: |
-          type=ref,event=branch
-          type=ref,event=pr
-          type=semver,pattern={{version}}
-          type=semver,pattern={{major}}.{{minor}}
-          type=sha,prefix={{branch}}-
-
     - name: Build and push Docker image
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        push: true
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: ${{ steps.meta.outputs.labels }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-
-    - name: Set tag for release
-      if: github.event_name == 'release'
       run: |
-        docker pull $REGISTRY/$IMAGE_NAME:latest
-        docker tag $REGISTRY/$IMAGE_NAME:latest $REGISTRY/$IMAGE_NAME:${{ github.event.release.tag_name }}
-        docker push $REGISTRY/$IMAGE_NAME:${{ github.event.release.tag_name }}
+        # Определяем тег
+        if [ "${{ github.event_name }}" == "release" ]; then
+          IMAGE_TAG="${{ github.event.release.tag_name }}"
+        else
+          IMAGE_TAG="${GITHUB_SHA::8}"
+        fi
+        
+        echo "Building image: $REGISTRY/$IMAGE_NAME:$IMAGE_TAG"
+        
+        # Собираем и пушим образ
+        docker build -t $REGISTRY/$IMAGE_NAME:$IMAGE_TAG .
+        docker push $REGISTRY/$IMAGE_NAME:$IMAGE_TAG
+        
+        # Также пушим latest для обычных коммитов
+        if [ "${{ github.event_name }}" == "push" ]; then
+          docker tag $REGISTRY/$IMAGE_NAME:$IMAGE_TAG $REGISTRY/$IMAGE_NAME:latest
+          docker push $REGISTRY/$IMAGE_NAME:latest
+        fi
 
   deploy-to-k8s:
     needs: push-to-registry
@@ -104,7 +97,7 @@ jobs:
 
     - name: Configure kubectl for Yandex Cloud
       run: |
-        # Создаем kubeconfig для доступа к кластеру
+        # Создаем kubeconfig
         cat << EOF > kubeconfig.yaml
         apiVersion: v1
         clusters:
@@ -132,23 +125,56 @@ jobs:
         # Определяем версию образа
         if [ "${{ github.event_name }}" == "release" ]; then
           IMAGE_TAG="${{ github.event.release.tag_name }}"
+          IMAGE_URL="$REGISTRY/$IMAGE_NAME:$IMAGE_TAG"
         else
           IMAGE_TAG="${GITHUB_SHA::8}"
+          IMAGE_URL="$REGISTRY/$IMAGE_NAME:$IMAGE_TAG"
         fi
         
-        echo "Deploying image: $REGISTRY/$IMAGE_NAME:$IMAGE_TAG"
+        echo "Deploying image: $IMAGE_URL to namespace: $K8S_NAMESPACE"
         
-        # Обновляем deployment
-        kubectl set image deployment/$DEPLOYMENT_NAME $DEPLOYMENT_NAME=$REGISTRY/$IMAGE_NAME:$IMAGE_TAG -n $K8S_NAMESPACE
+        # Создаем временный файл манифеста для обновления
+        cat << EOF > deployment-patch.yaml
+        spec:
+          template:
+            spec:
+              containers:
+              - name: $DEPLOYMENT_NAME
+                image: $IMAGE_URL
+        EOF
+        
+        # Патчим deployment с новым образом
+        kubectl patch deployment $DEPLOYMENT_NAME \
+          --namespace $K8S_NAMESPACE \
+          --patch-file deployment-patch.yaml
         
         # Ждем rollout
-        kubectl rollout status deployment/$DEPLOYMENT_NAME -n $K8S_NAMESPACE --timeout=300s
+        echo "Waiting for rollout to complete..."
+        kubectl rollout status deployment/$DEPLOYMENT_NAME \
+          --namespace $K8S_NAMESPACE \
+          --timeout=300s
         
         # Проверяем статус
-        kubectl get pods -n $K8S_NAMESPACE
-        kubectl get svc -n $K8S_NAMESPACE
+        echo "Current deployment status:"
+        kubectl get deployment $DEPLOYMENT_NAME --namespace $K8S_NAMESPACE -o wide
+        
+        echo "Current pods:"
+        kubectl get pods --namespace $K8S_NAMESPACE -l app=$DEPLOYMENT_NAME
 
-    - name: Verify deployment
+    - name: Verify application
       run: |
         export KUBECONFIG=kubeconfig.yaml
-        kubectl get deployments -n $K8S_NAMESPACE -o wide
+        echo "Verifying application health..."
+        
+        # Получаем IP Load Balancer
+        LB_IP=$(kubectl get service testapp-service -n $K8S_NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+        if [ -n "$LB_IP" ]; then
+          echo "Testing application via Load Balancer: http://$LB_IP/"
+          curl -f http://$LB_IP/healthz || echo "Health check failed"
+        else
+          echo "Load Balancer IP not available, testing via NodePort"
+          # Тестируем через NodePort на одной из нод
+          NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="ExternalIP")].address}')
+          NODE_PORT=$(kubectl get service testapp-service -n $K8S_NAMESPACE -o jsonpath='{.spec.ports[0].nodePort}')
+          curl -f http://$NODE_IP:$NODE_PORT/healthz || echo "Health check failed"
+        fi

@@ -94,35 +94,32 @@ jobs:
         K8S_ENDPOINT: ${{ secrets.K8S_ENDPOINT }}
         K8S_TOKEN: ${{ secrets.K8S_TOKEN }}
       run: |
-        # Убедимся, что CA cert правильно закодирован
-        CA_CERT_BASE64=$(echo "$K8S_CA_CERT" | base64 -w 0)
-        
-        cat > kubeconfig.yaml << EOF
-        apiVersion: v1
-        kind: Config
-        clusters:
-        - name: cluster
-          cluster:
-            certificate-authority-data: $CA_CERT_BASE64
-            server: $K8S_ENDPOINT
-        contexts:
-        - name: context
-          context:
-            cluster: cluster
-            user: user
-            namespace: $K8S_NAMESPACE
-        current-context: context
-        users:
-        - name: user
-          user:
-            token: $K8S_TOKEN
-        EOF
+        # Альтернативный подход - создаем файл по частям
+        echo "apiVersion: v1" > kubeconfig.yaml
+        echo "kind: Config" >> kubeconfig.yaml
+        echo "clusters:" >> kubeconfig.yaml
+        echo "- name: cluster" >> kubeconfig.yaml
+        echo "  cluster:" >> kubeconfig.yaml
+        echo "    certificate-authority-data: $K8S_CA_CERT" >> kubeconfig.yaml
+        echo "    server: $K8S_ENDPOINT" >> kubeconfig.yaml
+        echo "contexts:" >> kubeconfig.yaml
+        echo "- name: context" >> kubeconfig.yaml
+        echo "  context:" >> kubeconfig.yaml
+        echo "    cluster: cluster" >> kubeconfig.yaml
+        echo "    user: user" >> kubeconfig.yaml
+        echo "    namespace: $K8S_NAMESPACE" >> kubeconfig.yaml
+        echo "current-context: context" >> kubeconfig.yaml
+        echo "users:" >> kubeconfig.yaml
+        echo "- name: user" >> kubeconfig.yaml
+        echo "  user:" >> kubeconfig.yaml
+        echo "    token: $K8S_TOKEN" >> kubeconfig.yaml
         
         echo "Kubeconfig created successfully"
-        echo "CA cert length: ${#K8S_CA_CERT}"
-        echo "Base64 CA cert length: ${#CA_CERT_BASE64}"
+        echo "Kubeconfig content:"
+        cat kubeconfig.yaml
         
         # Проверим синтаксис kubeconfig
+        echo "Validating kubeconfig syntax..."
         kubectl --kubeconfig=kubeconfig.yaml config view
 
     - name: Test cluster connection
@@ -144,6 +141,9 @@ jobs:
         
         IMAGE_URL="$REGISTRY/$IMAGE_NAME:$TAG"
         echo "Deploying image: $IMAGE_URL"
+        
+        # Создаем namespace если не существует
+        kubectl create namespace $K8S_NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
         
         kubectl set image deployment/$DEPLOYMENT_NAME $DEPLOYMENT_NAME=$IMAGE_URL -n $K8S_NAMESPACE
         

@@ -47,9 +47,17 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
-    - name: Log in to Yandex Container Registry
+    - name: Create JSON key file
       run: |
-        echo "${{ secrets.YC_SA_KEY }}" | docker login --username json_key --password-stdin cr.yandex
+        echo '${{ secrets.YC_SA_KEY }}' > key.json
+        cat key.json | jq -r '.private_key' > private_key.pem
+
+    - name: Log in to Yandex Container Registry (correct method)
+      run: |
+        cat key.json | docker login \
+          --username json_key \
+          --password-stdin \
+          cr.yandex
 
     - name: Extract metadata
       id: meta
@@ -128,6 +136,8 @@ jobs:
           IMAGE_TAG="${GITHUB_SHA::8}"
         fi
         
+        echo "Deploying image: $REGISTRY/$IMAGE_NAME:$IMAGE_TAG"
+        
         # Обновляем deployment
         kubectl set image deployment/$DEPLOYMENT_NAME $DEPLOYMENT_NAME=$REGISTRY/$IMAGE_NAME:$IMAGE_TAG -n $K8S_NAMESPACE
         
@@ -137,3 +147,8 @@ jobs:
         # Проверяем статус
         kubectl get pods -n $K8S_NAMESPACE
         kubectl get svc -n $K8S_NAMESPACE
+
+    - name: Verify deployment
+      run: |
+        export KUBECONFIG=kubeconfig.yaml
+        kubectl get deployments -n $K8S_NAMESPACE -o wide

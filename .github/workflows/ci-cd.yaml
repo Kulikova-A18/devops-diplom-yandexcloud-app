@@ -55,10 +55,7 @@ jobs:
     - name: Log in to Yandex Container Registry
       run: |
         echo '${{ secrets.YC_SA_KEY }}' > /tmp/key.json
-        cat /tmp/key.json | docker login \
-          --username json_key \
-          --password-stdin \
-          cr.yandex
+        cat /tmp/key.json | docker login --username json_key --password-stdin cr.yandex
 
     - name: Build and push Docker image
       run: |
@@ -90,8 +87,6 @@ jobs:
 
     - name: Set up kubectl
       uses: azure/setup-kubectl@v3
-      with:
-        version: 'v1.30.0'
 
     - name: Deploy to Kubernetes
       run: |
@@ -118,7 +113,6 @@ EOF
         export KUBECONFIG=kubeconfig.yaml
         
         echo "Testing cluster connection..."
-        kubectl cluster-info
         kubectl get nodes
         
         if [ "${{ github.event_name }}" == "release" ]; then
@@ -128,34 +122,23 @@ EOF
         fi
         
         IMAGE_URL="$REGISTRY/$IMAGE_NAME:$TAG"
-        echo "Deploying image: $IMAGE_URL to namespace: $K8S_NAMESPACE"
+        echo "Deploying image: $IMAGE_URL"
         
         kubectl set image deployment/$DEPLOYMENT_NAME $DEPLOYMENT_NAME=$IMAGE_URL -n $K8S_NAMESPACE
         
-        echo "Waiting for rollout to complete..."
+        echo "Waiting for rollout..."
         kubectl rollout status deployment/$DEPLOYMENT_NAME -n $K8S_NAMESPACE --timeout=300s
         
         echo "Deployment status:"
-        kubectl get deployment/$DEPLOYMENT_NAME -n $K8S_NAMESPACE -o wide
-        
-        echo "Pods status:"
-        kubectl get pods -n $K8S_NAMESPACE -l app=$DEPLOYMENT_NAME
+        kubectl get deployment/$DEPLOYMENT_NAME -n $K8S_NAMESPACE
 
-    - name: Verify application health
+    - name: Verify application
       run: |
         export KUBECONFIG=kubeconfig.yaml
-        
-        echo "Verifying application health..."
-        kubectl get svc -n $K8S_NAMESPACE
+        echo "Verifying deployment..."
         kubectl get pods -n $K8S_NAMESPACE -l app=$DEPLOYMENT_NAME
-        
-        POD_NAME=$(kubectl get pods -n $K8S_NAMESPACE -l app=$DEPLOYMENT_NAME --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].metadata.name}')
-        echo "Checking logs for pod: $POD_NAME"
-        kubectl logs -n $K8S_NAMESPACE $POD_NAME --tail=10
-        
-        echo "✓ Deployment completed successfully"
 
-  notify-success:
+  notify:
     needs: [build-and-test, push-to-registry, deploy-to-k8s]
     runs-on: ubuntu-latest
     if: always()
@@ -166,11 +149,10 @@ EOF
       run: |
         echo "🎉 CI/CD Pipeline completed successfully!"
         echo "Image: $REGISTRY/$IMAGE_NAME:${GITHUB_SHA::8}"
-        echo "Deployed to: $K8S_NAMESPACE/$DEPLOYMENT_NAME"
+        echo "Deployed to namespace: $K8S_NAMESPACE"
 
     - name: Notify failure
       if: needs.build-and-test.result == 'failure' || needs.push-to-registry.result == 'failure' || needs.deploy-to-k8s.result == 'failure'
       run: |
         echo "❌ CI/CD Pipeline failed"
-        echo "Check the logs for details"
         exit 1

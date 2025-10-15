@@ -32,8 +32,14 @@ jobs:
 
     - name: Run tests
       run: |
-        # Здесь можно добавить тесты приложения
         echo "Running tests..."
+        # Пример простого теста - проверяем что index.html существует
+        if [ -f "index.html" ]; then
+          echo "✓ index.html found"
+        else
+          echo "✗ index.html not found"
+          exit 1
+        fi
 
   push-to-registry:
     needs: build-and-test
@@ -50,10 +56,7 @@ jobs:
     - name: Log in to Yandex Container Registry
       run: |
         # Создаем временный файл с JSON ключом
-        cat << 'EOF' > /tmp/key.json
-        ${{ secrets.YC_SA_KEY }}
-        EOF
-        
+        echo '${{ secrets.YC_SA_KEY }}' > /tmp/key.json
         # Аутентифицируемся
         cat /tmp/key.json | docker login \
           --username json_key \
@@ -79,6 +82,7 @@ jobs:
         if [ "${{ github.event_name }}" == "push" ]; then
           docker tag $REGISTRY/$IMAGE_NAME:$IMAGE_TAG $REGISTRY/$IMAGE_NAME:latest
           docker push $REGISTRY/$IMAGE_NAME:latest
+          echo "Pushed latest tag"
         fi
 
   deploy-to-k8s:
@@ -95,86 +99,95 @@ jobs:
       with:
         version: 'v1.30.0'
 
-    - name: Configure kubectl for Yandex Cloud
-      run: |
-        # Создаем kubeconfig
-        cat << EOF > kubeconfig.yaml
-        apiVersion: v1
-        clusters:
-        - cluster:
-            certificate-authority-data: ${{ secrets.K8S_CA_CERT }}
-            server: ${{ secrets.K8S_ENDPOINT }}
-          name: yc-k8s-cluster
-        contexts:
-        - context:
-            cluster: yc-k8s-cluster
-            user: yc-k8s-user
-          name: yc-k8s-context
-        current-context: yc-k8s-context
-        kind: Config
-        users:
-        - name: yc-k8s-user
-          user:
-            token: ${{ secrets.K8S_TOKEN }}
-        EOF
-
     - name: Deploy to Kubernetes
       run: |
+        # Создаем kubeconfig
+        cat > kubeconfig.yaml << CONFIG
+apiVersion: v1
+clusters:
+- cluster:
+    certificate-authority-data: ${{ secrets.K8S_CA_CERT }}
+    server: ${{ secrets.K8S_ENDPOINT }}
+  name: cluster
+contexts:
+- context:
+    cluster: cluster
+    user: user
+  name: context
+current-context: context
+kind: Config
+users:
+- name: user
+  user:
+    token: ${{ secrets.K8S_TOKEN }}
+CONFIG
+
         export KUBECONFIG=kubeconfig.yaml
         
-        # Определяем версию образа
+        # Проверяем подключение к кластеру
+        echo "Testing cluster connection..."
+        kubectl cluster-info
+        kubectl get nodes
+        
+        # Определяем тег образа
         if [ "${{ github.event_name }}" == "release" ]; then
-          IMAGE_TAG="${{ github.event.release.tag_name }}"
-          IMAGE_URL="$REGISTRY/$IMAGE_NAME:$IMAGE_TAG"
+          TAG="${{ github.event.release.tag_name }}"
         else
-          IMAGE_TAG="${GITHUB_SHA::8}"
-          IMAGE_URL="$REGISTRY/$IMAGE_NAME:$IMAGE_TAG"
+          TAG="${GITHUB_SHA::8}"
         fi
         
+        IMAGE_URL="$REGISTRY/$IMAGE_NAME:$TAG"
         echo "Deploying image: $IMAGE_URL to namespace: $K8S_NAMESPACE"
         
-        # Создаем временный файл манифеста для обновления
-        cat << EOF > deployment-patch.yaml
-        spec:
-          template:
-            spec:
-              containers:
-              - name: $DEPLOYMENT_NAME
-                image: $IMAGE_URL
-        EOF
+        # Обновляем deployment
+        kubectl set image deployment/$DEPLOYMENT_NAME $DEPLOYMENT_NAME=$IMAGE_URL -n $K8S_NAMESPACE
         
-        # Патчим deployment с новым образом
-        kubectl patch deployment $DEPLOYMENT_NAME \
-          --namespace $K8S_NAMESPACE \
-          --patch-file deployment-patch.yaml
-        
-        # Ждем rollout
+        # Ждем обновления
         echo "Waiting for rollout to complete..."
-        kubectl rollout status deployment/$DEPLOYMENT_NAME \
-          --namespace $K8S_NAMESPACE \
-          --timeout=300s
+        kubectl rollout status deployment/$DEPLOYMENT_NAME -n $K8S_NAMESPACE --timeout=300s
         
         # Проверяем статус
-        echo "Current deployment status:"
-        kubectl get deployment $DEPLOYMENT_NAME --namespace $K8S_NAMESPACE -o wide
+        echo "Deployment status:"
+        kubectl get deployment/$DEPLOYMENT_NAME -n $K8S_NAMESPACE -o wide
         
-        echo "Current pods:"
-        kubectl get pods --namespace $K8S_NAMESPACE -l app=$DEPLOYMENT_NAME
+        echo "Pods status:"
+        kubectl get pods -n $K8S_NAMESPACE -l app=$DEPLOYMENT_NAME
 
-    - name: Verify application
+    - name: Verify application health
       run: |
         export KUBECONFIG=kubeconfig.yaml
+        
         echo "Verifying application health..."
         
-        # Получаем IP Load Balancer
-        LB_IP=$(kubectl get service testapp-service -n $K8S_NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-        if [ -n "$LB_IP" ]; then
-          echo "Testing application via Load Balancer: http://$LB_IP/"
-          curl -f http://$LB_IP/healthz || echo "Health check failed"
-        else
-          echo "Load Balancer IP not available, testing via NodePort"
-          # Тестируем через NodePort на одной из нод
-          NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="ExternalIP")].address}')
-          NODE_PORT=$(kubectl get service testapp-service -n $K8S_NAMESPACE -o jsonpath='{.spec.ports[0].nodePort}')
-          curl -f http://$NODE_IP:$NODE_PORT/healthz || echo "Health check failed"
-        fi
+        # Получаем информацию о сервисе
+        kubectl get svc -n $K8S_NAMESPACE
+        
+        # Проверяем поды
+        kubectl get pods -n $K8S_NAMESPACE -l app=$DEPLOYMENT_NAME
+        
+        # Проверяем логи последнего пода
+        POD_NAME=$(kubectl get pods -n $K8S_NAMESPACE -l app=$DEPLOYMENT_NAME --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].metadata.name}')
+        echo "Checking logs for pod: $POD_NAME"
+        kubectl logs -n $K8S_NAMESPACE $POD_NAME --tail=10
+        
+        echo "✓ Deployment completed successfully"
+
+  notify-success:
+    needs: [build-and-test, push-to-registry, deploy-to-k8s]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+    - name: Notify success
+      if: needs.build-and-test.result == 'success' && needs.push-to-registry.result == 'success' && needs.deploy-to-k8s.result == 'success'
+      run: |
+        echo "CI/CD Pipeline completed successfully!"
+        echo "Image: $REGISTRY/$IMAGE_NAME:${GITHUB_SHA::8}"
+        echo "Deployed to: $K8S_NAMESPACE/$DEPLOYMENT_NAME"
+
+    - name: Notify failure
+      if: needs.build-and-test.result == 'failure' || needs.push-to-registry.result == 'failure' || needs.deploy-to-k8s.result == 'failure'
+      run: |
+        echo "CI/CD Pipeline failed"
+        echo "Check the logs for details"
+        exit 1

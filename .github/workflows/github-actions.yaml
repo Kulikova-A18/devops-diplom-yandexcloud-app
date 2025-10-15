@@ -1,0 +1,139 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  release:
+    types: [ published ]
+
+env:
+  REGISTRY: cr.yandex/crps1p5u048a00f4o97j
+  IMAGE_NAME: testapp
+  K8S_NAMESPACE: app
+  DEPLOYMENT_NAME: testapp
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build Docker image
+      run: |
+        docker build -t $REGISTRY/$IMAGE_NAME:${GITHUB_SHA::8} .
+        docker build -t $REGISTRY/$IMAGE_NAME:latest .
+
+    - name: Run tests
+      run: |
+        # Здесь можно добавить тесты приложения
+        echo "Running tests..."
+
+  push-to-registry:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'release'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to Yandex Container Registry
+      run: |
+        echo "${{ secrets.YC_SA_KEY }}" | docker login --username json_key --password-stdin cr.yandex
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: $REGISTRY/$IMAGE_NAME
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=sha,prefix={{branch}}-
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Set tag for release
+      if: github.event_name == 'release'
+      run: |
+        docker pull $REGISTRY/$IMAGE_NAME:latest
+        docker tag $REGISTRY/$IMAGE_NAME:latest $REGISTRY/$IMAGE_NAME:${{ github.event.release.tag_name }}
+        docker push $REGISTRY/$IMAGE_NAME:${{ github.event.release.tag_name }}
+
+  deploy-to-k8s:
+    needs: push-to-registry
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'release'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'v1.30.0'
+
+    - name: Configure kubectl for Yandex Cloud
+      run: |
+        # Создаем kubeconfig для доступа к кластеру
+        cat << EOF > kubeconfig.yaml
+        apiVersion: v1
+        clusters:
+        - cluster:
+            certificate-authority-data: ${{ secrets.K8S_CA_CERT }}
+            server: ${{ secrets.K8S_ENDPOINT }}
+          name: yc-k8s-cluster
+        contexts:
+        - context:
+            cluster: yc-k8s-cluster
+            user: yc-k8s-user
+          name: yc-k8s-context
+        current-context: yc-k8s-context
+        kind: Config
+        users:
+        - name: yc-k8s-user
+          user:
+            token: ${{ secrets.K8S_TOKEN }}
+        EOF
+
+    - name: Deploy to Kubernetes
+      run: |
+        export KUBECONFIG=kubeconfig.yaml
+        
+        # Определяем версию образа
+        if [ "${{ github.event_name }}" == "release" ]; then
+          IMAGE_TAG="${{ github.event.release.tag_name }}"
+        else
+          IMAGE_TAG="${GITHUB_SHA::8}"
+        fi
+        
+        # Обновляем deployment
+        kubectl set image deployment/$DEPLOYMENT_NAME $DEPLOYMENT_NAME=$REGISTRY/$IMAGE_NAME:$IMAGE_TAG -n $K8S_NAMESPACE
+        
+        # Ждем rollout
+        kubectl rollout status deployment/$DEPLOYMENT_NAME -n $K8S_NAMESPACE --timeout=300s
+        
+        # Проверяем статус
+        kubectl get pods -n $K8S_NAMESPACE
+        kubectl get svc -n $K8S_NAMESPACE

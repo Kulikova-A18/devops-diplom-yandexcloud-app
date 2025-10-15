@@ -46,17 +46,18 @@ jobs:
         K8S_CA_CERT: ${{ secrets.K8S_CA_CERT }}
         K8S_TOKEN: ${{ secrets.K8S_TOKEN }}
       run: |
-        # Используем IP одной из нод напрямую
-        NODE_IP="158.160.197.70"  # Одна из ваших рабочих нод
+        # Используем IP одной из нод напрямую с портом 30102
+        NODE_IP="158.160.203.227"  # Одна из ваших рабочих нод
         
-        echo "Configuring kubectl to use node IP: $NODE_IP"
+        echo "Configuring kubectl to use node IP: $NODE_IP:30102"
         
         # Создаем временный файл для CA сертификата
         echo "$K8S_CA_CERT" > ca.crt
         
         kubectl config set-cluster my-cluster \
-          --server="https://$NODE_IP:6443" \
-          --certificate-authority=ca.crt
+          --server="https://$NODE_IP:30102" \
+          --certificate-authority=ca.crt \
+          --insecure-skip-tls-verify=true
         
         kubectl config set-credentials my-user \
           --token="$K8S_TOKEN"
@@ -79,9 +80,9 @@ jobs:
         echo "Testing cluster connection..."
         kubectl cluster-info && kubectl get nodes || echo "Cluster connection test completed with recommendations"
         echo "РЕКОМЕНДАЦИИ ПО РЕШЕНИЮ ПРОБЛЕМЫ:"
-        echo "1. Проверьте доступность порта 6443 на ноде: nc -zv 158.160.197.70 6443"
-        echo "2. Попробуйте другие ноды: 89.169.152.21:6443 или 84.201.152.99:6443"
-        echo "3. Если порт 6443 недоступен, попробуйте порт 443"
+        echo "1. Проверьте доступность порта 30102 на ноде: nc -zv 158.160.203.227 30102"
+        echo "2. Попробуйте другие ноды: 89.169.152.21:30102 или 89.169.189.245:30102"
+        echo "3. Если порт 30102 недоступен, проверьте настройки LoadBalancer и порты сервисов"
         echo "4. Настройте self-hosted runner внутри вашей VPC"
         echo "5. Проверьте корректность секретов K8S_CA_CERT и K8S_TOKEN"
 
@@ -122,7 +123,7 @@ jobs:
         echo "РЕКОМЕНДАЦИИ ПО ВЕРИФИКАЦИИ:"
         echo "1. Проверьте что поды существуют: kubectl get pods -n $K8S_NAMESPACE"
         echo "2. Проверьте логи проблемных подов"
-        echo "3. Убедитесь что сервис доступен"
+        echo "3. Убедитесь что сервис доступен по адресу: http://158.160.203.227:30102"
         
         echo "Deployment process completed successfully"
         echo "Для дальнейшей диагностики используйте:"

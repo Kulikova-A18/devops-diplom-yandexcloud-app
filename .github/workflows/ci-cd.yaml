@@ -111,13 +111,20 @@ jobs:
         echo "- name: user" >> kubeconfig.yaml
         echo "  user:" >> kubeconfig.yaml
         echo "    token: $K8S_TOKEN" >> kubeconfig.yaml
+        
+        echo "Kubeconfig created successfully"
+        echo "First 5 lines of kubeconfig:"
+        head -5 kubeconfig.yaml
+
+    - name: Test kubeconfig
+      run: |
+        export KUBECONFIG=kubeconfig.yaml
+        echo "Testing cluster connection..."
+        kubectl get nodes
 
     - name: Deploy to Kubernetes
       run: |
         export KUBECONFIG=kubeconfig.yaml
-        
-        echo "Testing cluster connection..."
-        kubectl get nodes
         
         if [ "${{ github.event_name }}" == "release" ]; then
           TAG="${{ github.event.release.tag_name }}"
